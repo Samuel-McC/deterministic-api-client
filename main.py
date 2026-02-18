@@ -1,4 +1,4 @@
-from client import DeterministicApiClient
+from deterministic_api_client.client import DeterministicApiClient
 
 if __name__ == "__main__":
     client = DeterministicApiClient("https://httpbin.org", timeout_seconds=5)

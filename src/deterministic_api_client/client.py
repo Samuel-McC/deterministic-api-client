@@ -6,17 +6,18 @@ from typing import Any, Dict, Optional
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from logger import get_logger, new_correlation_id
+from .logger import get_logger, new_correlation_id
+
 
 log = get_logger("deterministic_client")
 
 
 class RetryableHttpError(Exception):
-    pass
+    """Raised for errors we want to retry safely (timeouts, 429, transient 5xx)."""
 
 
 class NonRetryableHttpError(Exception):
-    pass
+    """Raised for errors we should not retry (most 4xx, unsafe retries)."""
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,12 @@ class DeterministicApiClient:
         idempotency_key: Optional[str] = None,
         correlation_id: Optional[str] = None,
     ) -> ApiResponse:
+        """
+        Deterministic request wrapper:
+        - Correlation ID for tracing
+        - Optional Idempotency-Key for safe retries on writes
+        - Retries only when logically safe
+        """
         cid = correlation_id or new_correlation_id()
         url = self._full_url(path)
 
@@ -70,8 +77,10 @@ class DeterministicApiClient:
         if idempotency_key:
             merged_headers["Idempotency-Key"] = idempotency_key
 
+        is_write = method.upper() in ("POST", "PUT", "PATCH")
+
         try:
-            log.info("http_request", extra={"cid": cid, "method": method, "url": url})
+            log.info("http_request", extra={"cid": cid, "method": method.upper(), "url": url})
 
             resp = self.session.request(
                 method=method.upper(),
@@ -82,25 +91,35 @@ class DeterministicApiClient:
             )
 
         except (requests.Timeout, requests.ConnectionError) as e:
+            # Critical rule: never retry an unsafe write without idempotency
+            if is_write and not idempotency_key:
+                log.info("http_non_retryable_timeout_write", extra={"cid": cid, "err": str(e)})
+                raise NonRetryableHttpError("Timeout on write without idempotency key") from e
+
             log.info("http_retryable_exception", extra={"cid": cid, "err": str(e)})
             raise RetryableHttpError(str(e)) from e
 
+        # Retryable statuses
         if resp.status_code in (429, 502, 503, 504):
             log.info("http_retryable_status", extra={"cid": cid, "status": resp.status_code})
             raise RetryableHttpError(f"Retryable status: {resp.status_code}")
 
+        # 5xx handling (retry only if safe)
         if 500 <= resp.status_code <= 599:
-            if method.upper() in ("POST", "PUT", "PATCH") and not idempotency_key:
+            if is_write and not idempotency_key:
                 raise NonRetryableHttpError(
                     f"Server error {resp.status_code} on write without idempotency key"
                 )
+            log.info("http_retryable_5xx", extra={"cid": cid, "status": resp.status_code})
             raise RetryableHttpError(f"Server error: {resp.status_code}")
 
+        # Non-retryable client errors (most 4xx)
         if 400 <= resp.status_code <= 499:
             raise NonRetryableHttpError(
                 f"Client error: {resp.status_code} {resp.text[:200]}"
             )
 
+        # Parse JSON if present
         parsed_json: Optional[Dict[str, Any]] = None
         try:
             if resp.headers.get("Content-Type", "").startswith("application/json"):
