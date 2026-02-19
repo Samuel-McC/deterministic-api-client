@@ -4,12 +4,28 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import requests
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type,RetryCallState
 
 from .logger import get_logger, new_correlation_id
 
 
 log = get_logger("deterministic_client")
+
+def _log_retry(retry_state: RetryCallState) -> None:
+    # Called by tenacity before sleeping between retries
+    try:
+        cid = retry_state.kwargs.get("correlation_id") or "unknown"
+    except Exception:
+        cid = "unknown"
+
+    attempt = retry_state.attempt_number
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    err = str(exc) if exc else "unknown"
+
+    log.info(
+        "http_retry_attempt",
+        extra={"cid": cid, "attempt": attempt, "error": err},
+    )
 
 
 class RetryableHttpError(Exception):
@@ -45,11 +61,13 @@ class DeterministicApiClient:
         return f"{self.base_url}{path}"
 
     @retry(
-        reraise=True,
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
-        retry=retry_if_exception_type(RetryableHttpError),
-    )
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.5, min=0.5, max=4),
+    retry=retry_if_exception_type(RetryableHttpError),
+    before_sleep=_log_retry,
+)
+
     def request(
         self,
         method: str,
