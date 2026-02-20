@@ -85,7 +85,9 @@ class DeterministicApiClient:
         - Retries only when logically safe
         """
         cid = correlation_id or new_correlation_id()
+        correlation_id = cid  # make it visible to tenacity callbacks
         url = self._full_url(path)
+
 
         merged_headers: Dict[str, str] = {}
         if headers:
@@ -96,6 +98,11 @@ class DeterministicApiClient:
             merged_headers["Idempotency-Key"] = idempotency_key
 
         is_write = method.upper() in ("POST", "PUT", "PATCH")
+
+        if is_write and not idempotency_key:
+            raise NonRetryableHttpError(
+                "Unsafe write requires idempotency_key (POST/PUT/PATCH)"
+            )
 
         try:
             log.info("http_request", extra={"cid": cid, "method": method.upper(), "url": url})

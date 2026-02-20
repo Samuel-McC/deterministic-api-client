@@ -49,7 +49,7 @@ def test_post_timeout_without_idempotency_does_not_retry(monkeypatch):
         client.request("POST", "/pay_bonus", json_body={"amount": 100})
 
     # Must only attempt once
-    assert calls["n"] == 1
+    assert calls["n"] == 0
 
 def test_post_500_without_idempotency_does_not_retry(monkeypatch):
     client = DeterministicApiClient("https://example.com", timeout_seconds=1)
@@ -65,7 +65,7 @@ def test_post_500_without_idempotency_does_not_retry(monkeypatch):
     with pytest.raises(NonRetryableHttpError):
         client.request("POST", "/pay_bonus", json_body={"amount": 100})
 
-    assert calls["n"] == 1
+    assert calls["n"] == 0
 
 def test_post_500_with_idempotency_retries(monkeypatch):
     client = DeterministicApiClient("https://example.com", timeout_seconds=1)
@@ -108,3 +108,18 @@ def test_logs_retry_attempts_on_429(monkeypatch, caplog):
 
     assert any("http_retry_attempt" in rec.message for rec in caplog.records)
 
+def test_forbids_write_without_idempotency_key(monkeypatch):
+    client = DeterministicApiClient("https://example.com", timeout_seconds=1)
+
+    calls = {"n": 0}
+
+    def fake_request(*args, **kwargs):
+        calls["n"] += 1
+        return FakeResp(200, text="ok", json_obj={"ok": True})
+
+    monkeypatch.setattr(client.session, "request", fake_request)
+
+    with pytest.raises(NonRetryableHttpError):
+        client.request("POST", "/pay_bonus", json_body={"amount": 100})
+
+    assert calls["n"] == 0
